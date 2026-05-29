@@ -1,10 +1,7 @@
-# Recipe for the "minimal" rootfs flavor (schema 1). Sourced by build.sh.
+# Recipe for the "minimal" rootfs flavor. Sourced by build.sh.
 #
 # Pure-apt: shell + coreutils + curl + jq + git + python3 interpreter.
 # No `provision` function → build.sh skips the chroot layer entirely.
-
-DESCRIPTION="Shell + coreutils + curl + jq + git + python3 (interpreter only)."
-APPROX_SIZE_MB=57
 
 # snapshot.ubuntu.com date for reproducible apt installs. Bump deliberately;
 # CI's reproducibility check will catch silent drift.

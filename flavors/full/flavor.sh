@@ -1,12 +1,9 @@
-# Recipe for the "full" rootfs flavor (schema 1). Sourced by build.sh.
+# Recipe for the "full" rootfs flavor. Sourced by build.sh.
 #
 # minimal + build toolchain + the Python/R/Node data-science stack. The apt
 # layer is declarative; the pip/R/Node steps (which need a torch CPU index and
 # the NodeSource repo) live in the `provision` function, run in the chroot
 # after bootstrap.
-
-DESCRIPTION="minimal + numpy + pandas + torch + R 4.4 + tidyverse + Node 22 + ts-node."
-APPROX_SIZE_MB=853
 
 # snapshot.ubuntu.com date for reproducible apt installs. Bump deliberately;
 # CI's reproducibility check will catch silent drift.
