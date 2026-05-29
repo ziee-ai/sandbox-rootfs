@@ -28,19 +28,19 @@ Output lands in `.cache/` (gitignored), version-less by default. Pass
 sentinel into the rootfs for local end-to-end testing — CI does this
 automatically using the release tag.
 
-You need `bubblewrap`, `squashfuse`, `squashfs-tools`, `zstd`, and
-`mmdebstrap` on the host:
+You need `systemd-container` (for `systemd-nspawn`), `squashfs-tools`,
+`zstd`, plus standard `curl` / `tar` / `sha256sum` on the host:
 
 ```bash
-sudo apt install bubblewrap squashfuse squashfs-tools zstd mmdebstrap
+sudo apt install systemd-container squashfs-tools zstd curl tar coreutils
 ```
 
-`mmdebstrap` is Linux-only. To iterate on Mac/Windows, run the build
+`systemd-nspawn` is Linux-only. To iterate on Mac/Windows, run the build
 inside a Linux container:
 
 ```bash
-docker run --rm -v $PWD:/work -w /work ubuntu:24.04 \
-  bash -c 'apt-get update && apt-get install -y mmdebstrap squashfs-tools zstd && ./build.sh --flavor minimal'
+docker run --rm --privileged -v $PWD:/work -w /work ubuntu:24.04 \
+  bash -c 'apt-get update && apt-get install -y systemd-container squashfs-tools zstd curl && ./build.sh --flavor minimal'
 ```
 
 ## Versioning
@@ -63,7 +63,7 @@ node-native modules get reinstalled cleanly.
 ```
 .
 ├── README.md              # this file
-├── build.sh               # generic mmdebstrap driver; outputs .squashfs or .tar.zst
+├── build.sh               # ubuntu-base + apt + systemd-nspawn driver; outputs .squashfs or .tar.zst
 ├── flavors/               # one self-contained recipe per flavor
 │   └── <flavor>/flavor.sh
 └── .github/workflows/release.yml   # tag-triggered build + sign + publish
@@ -88,7 +88,7 @@ Each tag produces **4 artifacts** (2 flavors × 2 packagings), plus
 | `ziee-sandbox-rootfs-x86_64-full.squashfs`    | Linux, macOS |
 | `ziee-sandbox-rootfs-x86_64-full.tar.zst`     | Windows |
 
-Same `mmdebstrap` snapshot drives both packagings, so the rootfs
+Same ubuntu-base + apt-snapshot drives both packagings, so the rootfs
 content is semantically identical — only the container format differs.
 `aarch64` artifacts will land via a second `arch:` entry in the
 release matrix once the build path is exercised on Apple Silicon

@@ -32,10 +32,15 @@ APT_PACKAGES="
   libffi-dev libssl-dev zlib1g-dev
   jq git git-lfs
   vim ripgrep fd-find tree net-tools dnsutils iputils-ping
-  gnupg lsb-release apt-transport-https
+  gnupg lsb-release
   r-base r-base-dev
   bubblewrap rsync
 "
+# Audit D7: dropped `apt-transport-https` — since apt 1.5 (Ubuntu
+# 18.04+) the https transport is built into apt itself, so the
+# transitional package is a no-op (it'd just install dependencies
+# already pulled in by curl/ca-certificates). Removing it shaves
+# build time + reduces the determinism-failure surface.
 
 # Post-apt provisioning. Runs inside the chroot via systemd-nspawn
 # with /etc/resolv.conf bound so pip/CRAN/npm can resolve. build.sh
@@ -58,12 +63,35 @@ provision() {
   pip3 install --no-cache-dir --break-system-packages \
     torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu
 
-  # R tidyverse. `Ncpus=detectCores()` halves install time vs serial.
-  Rscript -e "install.packages(c('ggplot2','dplyr','tidyr','readr','stringr','lubridate','purrr','tibble','jsonlite','httr','data.table','caret','forecast'), repos='https://cloud.r-project.org', Ncpus=parallel::detectCores())"
+  # R tidyverse.
+  #
+  # Audit D6: hard-pin `Ncpus=2` so the package-install order is
+  # stable across build hosts. With `detectCores()` the order +
+  # interleaving of compile output depend on the runner's vCPU
+  # count — fine for a single host, but bit-determinism across
+  # operator rebuilds + CI requires a fixed value. 2 keeps install
+  # time bounded (~halves the serial cost) without re-introducing
+  # the wider parallelism's non-determinism.
+  Rscript -e "install.packages(c('ggplot2','dplyr','tidyr','readr','stringr','lubridate','purrr','tibble','jsonlite','httr','data.table','caret','forecast'), repos='https://cloud.r-project.org', Ncpus=2)"
 
   # Node 22 + ts-node from NodeSource (Canonical's noble repo only
   # ships node 18; the LLM frequently asks for >=20).
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  apt-get install -y --no-install-recommends nodejs
+  #
+  # Audit S2: install via the NodeSource apt repo + GPG-verified deb,
+  # NOT `curl https://deb.nodesource.com/setup_22.x | bash -`. The
+  # curl|bash path runs a dynamically-generated remote script with no
+  # signature check; a compromise of NodeSource's CDN would inject
+  # arbitrary code into the rootfs. The apt-repo path verifies the
+  # .deb against a fixed signing key pinned in `/etc/apt/keyrings/`.
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+    https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  chmod 0644 /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
+  apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 -qq update
+  apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 \
+    -y --no-install-recommends install nodejs
   npm install -g typescript ts-node
 }

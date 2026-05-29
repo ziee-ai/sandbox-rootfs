@@ -240,15 +240,36 @@ echo "==> apt install (snapshot=$APT_SNAPSHOT)"
 # Each flavor recipe also still ships APT_SNAPSHOT for that override
 # path; the live default ignores it.
 if [[ -n "${APT_MIRROR:-}" ]]; then
+  # Audit S3: validate operator-supplied mirror to prevent shell
+  # injection via APT_MIRROR (string lands inside the sources.list
+  # content + log output, but a `;rm -rf /` flavor would survive into
+  # the chroot via the apt-get update call's parse). Permit standard
+  # URL characters (RFC 3986 unreserved + sub-delims commonly used
+  # in mirrors: `?` `&` `=` `+` `~` `%`), reject shell metacharacters.
+  # Convergence audit: the previous regex rejected snapshot mirrors
+  # that used `?` query params or `~user/path`.
+  if [[ ! "$APT_MIRROR" =~ ^https?://[A-Za-z0-9._/~%?&=+:-]+$ ]]; then
+    echo "build.sh: APT_MIRROR contains invalid chars; expected http(s)://[host/path]" >&2
+    exit 2
+  fi
   mirror_base="$APT_MIRROR"
   echo "==> apt mirror: $APT_MIRROR (override)"
 else
   mirror_base="http://archive.ubuntu.com/ubuntu"
 fi
+# Audit S1: drop `[trusted=yes]` so apt enforces the standard
+# GPG-signed-repo guarantee. ubuntu-base 24.04 ships
+# `/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg` which has
+# the Canonical archive + security signing keys, so plain
+# `deb http://archive.ubuntu.com/ubuntu …` verifies the same way the
+# host's apt does. Operators using `APT_MIRROR` with a custom mirror
+# that doesn't use the Canonical keys can re-add `[trusted=yes]` via
+# their own sources.list, but the default no longer asserts blind
+# trust on the network path.
 {
-  echo "deb [trusted=yes] $mirror_base noble main universe"
-  echo "deb [trusted=yes] $mirror_base noble-updates main universe"
-  echo "deb [trusted=yes] $mirror_base noble-security main universe"
+  echo "deb $mirror_base noble main universe"
+  echo "deb $mirror_base noble-updates main universe"
+  echo "deb $mirror_base noble-security main universe"
 } | run_as_root tee "$STAGE_DIR/etc/apt/sources.list" >/dev/null
 run_as_root rm -f "$STAGE_DIR/etc/apt/sources.list.d/"*.sources 2>/dev/null || true
 
@@ -302,7 +323,16 @@ if declare -f provision >/dev/null; then
   # $STAGE_DIR/tmp/ left the file invisible to the SECOND nspawn
   # (suspect: nspawn's propagate-dir cleanup interferes between
   # consecutive calls on the same stage). Bind-mount sidesteps it.
-  prov_host="$(mktemp /tmp/ziee-provision.XXXXXX.sh)"
+  #
+  # Audit S4: use a per-flavor mktemp dir so concurrent build.sh
+  # invocations (e.g. CI matrix with minimal + full both running)
+  # don't share the same /tmp path. Audit S5: trap-clean the temp
+  # immediately so an nspawn failure doesn't leak the script on the
+  # build host.
+  prov_dir="$(mktemp -d "/tmp/ziee-provision-${FLAVOR}.XXXXXX")"
+  cleanup_provision() { rm -rf "$prov_dir" 2>/dev/null || true; }
+  trap 'cleanup_provision; cleanup_stage' EXIT
+  prov_host="$prov_dir/provision.sh"
   {
     echo "set -euo pipefail"
     echo "export DEBIAN_FRONTEND=noninteractive"
@@ -315,7 +345,7 @@ if declare -f provision >/dev/null; then
     --bind-ro=/etc/resolv.conf \
     --bind-ro="$prov_host":/ziee-provision.sh \
     /bin/bash /ziee-provision.sh 2>&1 | tail -30
-  rm -f "$prov_host"
+  cleanup_provision
 fi
 
 # --------------------------------------------------------------------
@@ -327,6 +357,15 @@ fi
 # --------------------------------------------------------------------
 
 echo "==> normalizing"
+# Audit D1/D2/D3/D4: additional non-deterministic / privacy-leaking
+# state from a fresh apt install / chroot provision pass.
+#   - /etc/machine-id: regenerated per `dpkg-reconfigure passwd` (full
+#     flavor's first apt run); random per build.
+#   - /usr/lib/locale/locale-archive: built by locale-gen, can shuffle
+#     entry order across builds.
+#   - /root/.{cache,local,npm}: pip + npm provision steps deposit
+#     mtimes + arbitrary state under root's HOME.
+#   - /var/lib/dbus/machine-id: same problem as /etc/machine-id.
 run_as_root rm -rf \
     "$STAGE_DIR/var/cache/apt/archives/"*.deb \
     "$STAGE_DIR/var/cache/apt/archives/partial" \
@@ -340,10 +379,20 @@ run_as_root rm -rf \
     "$STAGE_DIR/var/log/alternatives.log" \
     "$STAGE_DIR/var/log/btmp" "$STAGE_DIR/var/log/wtmp" "$STAGE_DIR/var/log/lastlog" \
     "$STAGE_DIR/var/lib/dpkg/info/"*.md5sums.tmp \
+    "$STAGE_DIR/var/lib/dbus/machine-id" \
     "$STAGE_DIR/etc/ld.so.cache" \
+    "$STAGE_DIR/etc/machine-id" \
+    "$STAGE_DIR/usr/lib/locale/locale-archive" \
     "$STAGE_DIR/tmp/"* \
     "$STAGE_DIR/root/.bash_history" \
+    "$STAGE_DIR/root/.cache" \
+    "$STAGE_DIR/root/.local" \
+    "$STAGE_DIR/root/.npm" \
   2>/dev/null || true
+# Re-create empty /etc/machine-id so systemd-style readers see a
+# zero-byte file (their preferred "uninitialised" indicator) instead
+# of an absent file (which makes some readers error).
+run_as_root touch "$STAGE_DIR/etc/machine-id"
 
 # Version sentinel (empty on dev builds; CI sets it to the release
 # tag minus the leading `v`).
@@ -383,10 +432,16 @@ if [[ "$PACKAGE" == "squashfs" ]]; then
   # var only for this invocation; we still pass the value via flags so
   # the output is bit-reproducible.
   sde="$SOURCE_DATE_EPOCH"
+  # Audit D5: `-no-fragments` disables the fragment-block packing
+  # heuristic whose ordering depends on filesystem walk order on the
+  # build host; `-no-recovery` skips writing the recovery file
+  # (sidecar, embeds wall-clock). Both nudge mksquashfs toward
+  # bit-stable output regardless of disk layout.
   run_as_root env -u SOURCE_DATE_EPOCH \
     mksquashfs "$STAGE_DIR" "$OUTPUT" \
       -comp zstd -Xcompression-level 19 \
       -no-xattrs \
+      -no-fragments -no-recovery \
       -all-time "$sde" \
       -mkfs-time "$sde" \
       -force-uid 0 -force-gid 0 \
