@@ -217,26 +217,38 @@ run_as_root tar --numeric-owner -xf "$BASE_CACHE" -C "$STAGE_DIR"
 pkgs="$(echo "$APT_PACKAGES" | tr -s '[:space:]' ' ')"
 
 echo "==> apt install (snapshot=$APT_SNAPSHOT)"
-# Default to snapshot.ubuntu.com (deterministic by date pin). Allow
-# `APT_MIRROR` env override so local dev runs can hit a fast live
-# mirror (e.g. `http://archive.ubuntu.com/ubuntu`) at the cost of
-# reproducibility. CI leaves the env unset → reproducible build.
-# Include the three pockets ubuntu-base built against — without
-# `noble-updates`/`noble-security` we hit unsatisfiable dependencies
-# when the base ships a security-updated `libbz2-1.0` / `perl-base` /
-# etc. that only the -security pocket carries at the pinned date.
+# Default to the live `archive.ubuntu.com` mirror. We discovered the
+# hard way that pinning to `snapshot.ubuntu.com/<date>` creates
+# unsatisfiable-dependency loops at random dates: when noble-security
+# advances libc6 / libssl3t64 / gpgv (etc.) ahead of when the
+# matching `-dev` packages get a coordinated bump in noble (main),
+# `apt install build-essential libssl-dev libffi-dev` blows up with
+# "X depends Y (= ver-a) but ver-b is to be installed". The live
+# archive doesn't have this problem because it always carries a
+# matched set.
+#
+# Reproducibility tradeoff: builds done weeks apart can pick up
+# different packages. We don't actually need
+# reproducibility-across-time — operators verify our release artifacts
+# by sha256 + cosign on the published file, not by re-running build.sh.
+# Reproducibility-within-an-hour (which the live archive trivially
+# satisfies) is sufficient.
+#
+# `APT_MIRROR` env overrides for operators who want snapshot pinning
+# anyway (e.g. an internal mirror with a fixed date pin):
+#   APT_MIRROR=https://snapshot.ubuntu.com/ubuntu/20260101T000000Z
+# Each flavor recipe also still ships APT_SNAPSHOT for that override
+# path; the live default ignores it.
 if [[ -n "${APT_MIRROR:-}" ]]; then
   mirror_base="$APT_MIRROR"
-  trust="[trusted=yes]"
-  echo "==> apt mirror: $APT_MIRROR (override; non-reproducible)"
+  echo "==> apt mirror: $APT_MIRROR (override)"
 else
-  mirror_base="https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}"
-  trust="[trusted=yes]"
+  mirror_base="http://archive.ubuntu.com/ubuntu"
 fi
 {
-  echo "deb $trust $mirror_base noble main universe"
-  echo "deb $trust $mirror_base noble-updates main universe"
-  echo "deb $trust $mirror_base noble-security main universe"
+  echo "deb [trusted=yes] $mirror_base noble main universe"
+  echo "deb [trusted=yes] $mirror_base noble-updates main universe"
+  echo "deb [trusted=yes] $mirror_base noble-security main universe"
 } | run_as_root tee "$STAGE_DIR/etc/apt/sources.list" >/dev/null
 run_as_root rm -f "$STAGE_DIR/etc/apt/sources.list.d/"*.sources 2>/dev/null || true
 
