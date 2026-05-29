@@ -248,7 +248,14 @@ if [[ -n "${APT_MIRROR:-}" ]]; then
   # in mirrors: `?` `&` `=` `+` `~` `%`), reject shell metacharacters.
   # Convergence audit: the previous regex rejected snapshot mirrors
   # that used `?` query params or `~user/path`.
-  if [[ ! "$APT_MIRROR" =~ ^https?://[A-Za-z0-9._/~%?&=+:-]+$ ]]; then
+  #
+  # The pattern MUST live in a variable: an unquoted `&` (and other
+  # chars) inside `[[ … =~ PATTERN ]]` is parsed as a bash control
+  # operator and aborts the whole script with "syntax error in
+  # conditional expression". A quoted variable on the RHS is matched
+  # literally-as-a-regex without that lexing hazard.
+  apt_mirror_re='^https?://[A-Za-z0-9._/~%?&=+:-]+$'
+  if [[ ! "$APT_MIRROR" =~ $apt_mirror_re ]]; then
     echo "build.sh: APT_MIRROR contains invalid chars; expected http(s)://[host/path]" >&2
     exit 2
   fi
