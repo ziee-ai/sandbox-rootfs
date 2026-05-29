@@ -157,18 +157,30 @@ build_mmdebstrap() {
     mode="root"
   fi
   echo "    (mmdebstrap mode=$mode)"
+  # `Acquire::Retries 10` makes apt retry on transient 503s from
+  # snapshot.ubuntu.com (which is best-effort archival and goes flaky
+  # at unpredictable times). Without this, a single transient 503
+  # mid-bootstrap aborts the whole build. Reproducibility is
+  # preserved — the retry path eventually downloads the same bytes
+  # at the same snapshot date.
   local mmd=(mmdebstrap
     --variant=minbase
     --mode="$mode"
     --components=main,universe
     --include="$pkgs"
+    --aptopt='Acquire::Retries "10";'
     noble
     "$STAGE_DIR"
     "$mirror")
+  # `set -o pipefail` is on (see top of file) so the grep filter
+  # doesn't swallow mmdebstrap's exit code. DO NOT add `|| true` —
+  # an earlier revision of this script did and a transient apt
+  # failure produced a half-finished but successfully-packaged
+  # rootfs. If mmdebstrap fails, the build fails.
   if [[ "$mode" == "root" && "$EUID" -ne 0 ]]; then
-    sudo -E "${mmd[@]}" 2>&1 | grep -vE "^I:" || true
+    sudo -E "${mmd[@]}" 2>&1 | grep -vE "^I:"
   else
-    "${mmd[@]}" 2>&1 | grep -vE "^I:" || true
+    "${mmd[@]}" 2>&1 | grep -vE "^I:"
   fi
 
   # Post-bootstrap provisioning, if the recipe defines it (pip/R/Node etc.
