@@ -126,7 +126,7 @@ sha256sum -c ziee-sandbox-rootfs-x86_64-minimal.squashfs.sha256
 cosign verify-blob \
   --bundle ziee-sandbox-rootfs-x86_64-minimal.squashfs.cosign.bundle \
   --certificate-identity-regexp \
-    '^https://github\.com/ziee-ai/sandbox-rootfs/\.github/workflows/release\.yml@refs/tags/v[0-9.]+$' \
+    '^https://github\.com/ziee-ai/sandbox-rootfs/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
   --certificate-oidc-issuer \
     https://token.actions.githubusercontent.com \
   ziee-sandbox-rootfs-x86_64-minimal.squashfs
