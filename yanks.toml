@@ -1,0 +1,13 @@
+# Yanked sandbox rootfs revisions (PyPI PEP 592 pattern).
+#
+# A yanked revision stays downloadable forever (anyone with a pinned
+# sha256 keeps working), but `fetch-sandbox-rootfs --version=latest`
+# will skip it.
+#
+# Format:
+#   [[yanks]]
+#   schema = 1
+#   revision = "r3"
+#   reason = "broken numpy pin causes import failure inside sandbox"
+
+# (no yanks yet)

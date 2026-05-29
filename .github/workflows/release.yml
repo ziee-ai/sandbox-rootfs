@@ -1,0 +1,171 @@
+name: release sandbox-rootfs
+
+# Build + sign + publish the sandbox rootfs on tag push.
+#
+# Triggered by `sandbox-rootfs-v{schema}.{revision}-{arch}` tags
+# (e.g. `sandbox-rootfs-v1.r0-x86_64`).
+#
+# The build is Linux-only because `mmdebstrap` requires a Linux host
+# (it bootstraps a Debian/Ubuntu rootfs). The OUTPUT, however, is
+# consumed on all three host OSes:
+#   - Linux:   `.squashfs`, mounted via `squashfuse` inside `bwrap`
+#   - macOS:   `.squashfs`, mounted via `libkrun` inside the microVM
+#   - Windows: `.tar.zst`,  imported into WSL2 (`wsl --import`)
+#
+# We produce both packagings per (flavor × arch) tag so every host
+# downloads the right artifact for its sandbox backend.
+#
+# Tests are NOT run in CI — run them locally before tagging
+# (see `just check` recipes in the ziee-chat repo). The only thing
+# this workflow does that you can't do locally is cosign keyless
+# signing, which requires the real GitHub Actions OIDC issuer.
+
+on:
+  push:
+    tags: ['sandbox-rootfs-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. sandbox-rootfs-v1.r3-x86_64). MUST already exist as a git tag.'
+        required: true
+
+# Do NOT cancel in-flight publishes — they upload artifacts and a
+# half-completed cancellation leaves a partial release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build (${{ matrix.flavor }}, ${{ matrix.package }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write   # gh release upload
+      id-token: write   # cosign keyless OIDC
+    strategy:
+      # Build flavors + packages in parallel; one failing doesn't block
+      # the others. Matrix expansion: 2 flavors × 2 packages = 4 jobs.
+      fail-fast: false
+      matrix:
+        flavor:  [minimal, full]
+        package: [squashfs, tar]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: validate tag shape
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if [ -z "$tag" ] || [ "$tag" = "main" ] || [ "$tag" = "master" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          if ! echo "$tag" | grep -Eq '^sandbox-rootfs-v[0-9]+\.r[0-9]+-(x86_64|aarch64)$'; then
+            echo "ERROR: tag '$tag' must match sandbox-rootfs-vN.rM-arch" >&2
+            exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: install host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap squashfuse squashfs-tools zsync zstd \
+            mmdebstrap systemd-container
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.0'
+
+      - name: build rootfs
+        run: ./build.sh --flavor ${{ matrix.flavor }} --package ${{ matrix.package }}
+
+      - name: reproducibility check
+        # Build twice, assert identical sha256. Catches non-determinism
+        # in mmdebstrap output (e.g., a pin update that introduced a
+        # package with build-time-dependent state). Both packagings are
+        # supposed to be bit-reproducible — tar uses GNU format + sorted
+        # names + fixed mtime + single-threaded zstd; squashfs uses
+        # SOURCE_DATE_EPOCH + -no-xattrs.
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
+          first=$(ls -t .cache/*-${{ matrix.flavor }}.${ext} | head -1)
+          sha1=$(sha256sum "$first" | cut -d' ' -f1)
+          rm "$first"
+          ./build.sh --flavor ${{ matrix.flavor }} --package ${{ matrix.package }}
+          second=$(ls -t .cache/*-${{ matrix.flavor }}.${ext} | head -1)
+          sha2=$(sha256sum "$second" | cut -d' ' -f1)
+          echo "first  sha256: $sha1"
+          echo "second sha256: $sha2"
+          test "$sha1" = "$sha2" || (
+            echo "REPRODUCIBILITY FAILURE: two builds produced different bytes" >&2
+            exit 1
+          )
+
+      - name: size sanity check
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
+          art=$(ls -t .cache/*-${{ matrix.flavor }}.${ext} | head -1)
+          size=$(stat -c%s "$art")
+          # GitHub Releases per-asset cap = 2 GiB.
+          if [ "$size" -gt $((2 * 1024 * 1024 * 1024)) ]; then
+            echo "FAIL: $art is $size bytes; exceeds GitHub Releases 2 GiB cap" >&2
+            exit 1
+          fi
+          # Per-flavor floors so a missing-package regression trips the
+          # build. Numbers are sized for squashfs (zstd-19); tar.zst
+          # comes out larger because it doesn't get the cross-file
+          # dedup that squashfs does, so we relax the floor for tar.
+          if [ "${{ matrix.flavor }}" = "minimal" ] && [ "$size" -lt $((50 * 1024 * 1024)) ]; then
+            echo "FAIL: minimal flavor suspiciously small ($size)" >&2; exit 1
+          fi
+          if [ "${{ matrix.flavor }}" = "full" ] && [ "$size" -lt $((500 * 1024 * 1024)) ]; then
+            echo "FAIL: full flavor suspiciously small ($size); likely missing packages" >&2; exit 1
+          fi
+
+      - name: generate sha256 + zsync sidecars
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
+          art=$(ls -t .cache/*-${{ matrix.flavor }}.${ext} | head -1)
+          sha256sum "$art" > "${art}.sha256"
+          # zsync gives incremental downloads — produce a sidecar for
+          # both packagings so an in-place update on either Linux/macOS
+          # (squashfs) or Windows (tar.zst) can skip unchanged blocks.
+          zsyncmake -o "${art}.zsync" "$art"
+
+      - name: cosign sign (keyless GitHub OIDC)
+        # Keyless cosign binds the signature to THIS workflow file's
+        # OIDC identity. Operators verify via:
+        #   --certificate-identity-regexp \
+        #     '^https://github\.com/ziee-ai/sandbox-rootfs/\.github/workflows/release\.yml@refs/tags/sandbox-rootfs-v.+$'
+        #   --certificate-oidc-issuer \
+        #     https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
+          art=$(ls -t .cache/*-${{ matrix.flavor }}.${ext} | head -1)
+          cosign sign-blob --yes --bundle "${art}.cosign.bundle" "$art"
+
+      - name: publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
+          gh release create "$TAG" \
+            --title "sandbox-rootfs $TAG" \
+            --notes "See compat.toml for the schema/server-version matrix and the per-host install notes." \
+            2>/dev/null || true
+          gh release upload "$TAG" \
+            .cache/*-${{ matrix.flavor }}.${ext} \
+            .cache/*-${{ matrix.flavor }}.${ext}.sha256 \
+            .cache/*-${{ matrix.flavor }}.${ext}.zsync \
+            .cache/*-${{ matrix.flavor }}.${ext}.cosign.bundle \
+            --clobber

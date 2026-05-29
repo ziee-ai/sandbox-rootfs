@@ -1,0 +1,19 @@
+# Sandbox rootfs ↔ server compatibility matrix.
+#
+# Schema = ABI break (Python major bump, binary path changes, layout
+# changes). Server binary embeds SANDBOX_ROOTFS_SCHEMA_VERSION; refuses
+# to enable when the rootfs's `.ziee-sandbox-rootfs-schema` doesn't match.
+#
+# Revision = rebuild for security patches / pin bumps within the same
+# schema. Server accepts any revision matching its schema.
+
+current_schema = 1
+
+[[schemas]]
+version = 1
+ziee_server_min = "0.1.0"
+ziee_server_max = "0.99.99"
+python = "3.12.x"
+r = "4.4.x"
+node = "22.x"
+status = "current"
