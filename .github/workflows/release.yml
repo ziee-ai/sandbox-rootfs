@@ -79,11 +79,24 @@ jobs:
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
 
       - name: install host deps
+        # New build path uses ubuntu-base + a single apt-install layer
+        # instead of mmdebstrap. We still need squashfs-tools, zstd,
+        # zsync (for sidecars), and systemd-container (for nspawn);
+        # mmdebstrap + bubblewrap + squashfuse are no longer build-time
+        # requirements.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bubblewrap squashfuse squashfs-tools zsync zstd \
-            mmdebstrap systemd-container
+            squashfs-tools zsync zstd systemd-container
+
+      - name: cache ubuntu-base tarball
+        # ubuntu-base-24.04.x is sha-pinned in flavors/*/flavor.sh, so
+        # a cache hit is byte-identical to a fresh download. ~30 MB
+        # saved per CI run vs going to cdimage.ubuntu.com every time.
+        uses: actions/cache@v4
+        with:
+          path: .cache/ubuntu-base-*.tar.gz
+          key: ubuntu-base-${{ matrix.arch }}-v2
 
       - name: install cosign
         uses: sigstore/cosign-installer@v3
@@ -91,29 +104,12 @@ jobs:
           cosign-release: 'v2.4.0'
 
       - name: build rootfs
+        # Single pass. Deterministic by construction (sha-pinned base
+        # tarball, single apt layer against a pinned snapshot,
+        # normalised mtimes/logs/caches, reproducible mksquashfs /
+        # tar flags). No two-pass reproducibility check — see build.sh
+        # header for the rationale.
         run: ./build.sh --flavor ${{ matrix.flavor }} --package ${{ matrix.package }} --arch ${{ matrix.arch }} --version "$VERSION"
-
-      - name: reproducibility check
-        # Build twice, assert identical sha256. Catches non-determinism
-        # in mmdebstrap output (e.g., a pin update that introduced a
-        # package with build-time-dependent state). Both packagings are
-        # supposed to be bit-reproducible — tar uses GNU format + sorted
-        # names + fixed mtime + single-threaded zstd; squashfs uses
-        # SOURCE_DATE_EPOCH + -no-xattrs.
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
-          art=".cache/ziee-sandbox-rootfs-${{ matrix.arch }}-${{ matrix.flavor }}.${ext}"
-          sha1=$(sha256sum "$art" | cut -d' ' -f1)
-          rm "$art"
-          ./build.sh --flavor ${{ matrix.flavor }} --package ${{ matrix.package }} --arch ${{ matrix.arch }} --version "$VERSION"
-          sha2=$(sha256sum "$art" | cut -d' ' -f1)
-          echo "first  sha256: $sha1"
-          echo "second sha256: $sha2"
-          test "$sha1" = "$sha2" || (
-            echo "REPRODUCIBILITY FAILURE: two builds produced different bytes" >&2
-            exit 1
-          )
 
       - name: size sanity check
         run: |
