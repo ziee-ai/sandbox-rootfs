@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Build a ziee sandbox rootfs squashfs.
+# Build a ziee sandbox rootfs squashfs (or tar.zst for WSL).
 #
 # Defaults:
-#   --flavor full
-#   --schema $(cat src-app/sandbox-rootfs/compat.toml | <current_schema>)
-#   --revision r0
-#   --arch    x86_64  (from `uname -m` — only override for cross-build)
+#   --flavor  full
+#   --arch    x86_64  (from `uname -m`; override for cross-build)
 #   --package squashfs   (squashfs = Linux/macOS; tar = Windows wsl --import → .tar.zst)
-#   --output  .ziee-cache/sandbox-rootfs/ziee-sandbox-rootfs-v{schema}.r{rev}-{arch}-{flavor}.{squashfs|tar.zst}
+#   --version <empty>    (CI passes the release tag minus the leading `v`; dev runs leave empty)
+#   --output  .cache/ziee-sandbox-rootfs-{arch}-{flavor}.{squashfs|tar.zst}
+#
+# Versioning is owned by the GitHub release tag (semver: `v0.1.0`). When
+# --version is set, the value is written into `/.ziee-sandbox-rootfs-version`
+# inside the rootfs as a debug breadcrumb. The server identifies the rootfs
+# by the DB row that recorded the download — the in-rootfs sentinel is not
+# load-bearing for mount decisions.
 #
 # Backend: mmdebstrap (reproducible-by-design, no daemon). Install it with
 #   apt install mmdebstrap squashfs-tools
@@ -23,8 +28,7 @@ set -euo pipefail
 # --------------------------------------------------------------------
 
 FLAVOR="full"
-SCHEMA=""
-REVISION="r0"
+VERSION=""
 ARCH="$(uname -m)"
 OUTPUT=""
 PACKAGE="squashfs"   # squashfs (Linux/macOS) | tar (Windows wsl --import)
@@ -32,8 +36,7 @@ PACKAGE="squashfs"   # squashfs (Linux/macOS) | tar (Windows wsl --import)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --flavor)    FLAVOR="$2";    shift 2 ;;
-    --schema)    SCHEMA="$2";    shift 2 ;;
-    --revision)  REVISION="$2";  shift 2 ;;
+    --version)   VERSION="$2";   shift 2 ;;
     --arch)      ARCH="$2";      shift 2 ;;
     --output)    OUTPUT="$2";    shift 2 ;;
     --package)   PACKAGE="$2";   shift 2 ;;
@@ -56,37 +59,21 @@ if ! command -v mmdebstrap >/dev/null; then
   exit 1
 fi
 
-# --------------------------------------------------------------------
-# Read schema version from compat.toml if not given.
-# --------------------------------------------------------------------
-
-# In this standalone repo the script sits at the repository root, so
-# SCRIPT_DIR == REPO_ROOT. (Historic ziee-chat layout was
-# src-app/sandbox-rootfs/build.sh — kept REPO_ROOT separate for the
-# rest of the script that uses it for the output cache + the
-# SOURCE_DATE_EPOCH lookup.)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 
-if [[ -z "$SCHEMA" ]]; then
-  if [[ -f "$SCRIPT_DIR/compat.toml" ]]; then
-    SCHEMA="$(awk -F'=' '/^current_schema/ {gsub(/[ "\047]/, "", $2); print $2; exit}' "$SCRIPT_DIR/compat.toml")"
-  fi
-  : "${SCHEMA:=1}"
-fi
-
 # --------------------------------------------------------------------
-# Resolve + source the flavor recipe: flavors/<flavor>/v<schema>/flavor.sh
+# Resolve + source the flavor recipe: flavors/<flavor>/flavor.sh
 # Each recipe is self-contained: APT_SNAPSHOT, APT_PACKAGES, and an
 # optional provision() function. Adding a flavor = drop in a new dir.
 # --------------------------------------------------------------------
 
-RECIPE="$SCRIPT_DIR/flavors/$FLAVOR/v$SCHEMA/flavor.sh"
+RECIPE="$SCRIPT_DIR/flavors/$FLAVOR/flavor.sh"
 if [[ ! -f "$RECIPE" ]]; then
   echo "build.sh: no recipe at $RECIPE" >&2
-  echo "  available flavors for schema v$SCHEMA:" >&2
-  for f in "$SCRIPT_DIR"/flavors/*/v"$SCHEMA"/flavor.sh; do
-    [[ -f "$f" ]] && echo "    - $(basename "$(dirname "$(dirname "$f")")")" >&2
+  echo "  available flavors:" >&2
+  for f in "$SCRIPT_DIR"/flavors/*/flavor.sh; do
+    [[ -f "$f" ]] && echo "    - $(basename "$(dirname "$f")")" >&2
   done
   exit 1
 fi
@@ -98,9 +85,7 @@ source "$RECIPE"
 if [[ "$PACKAGE" == "tar" ]]; then EXT="tar.zst"; else EXT="squashfs"; fi
 
 if [[ -z "$OUTPUT" ]]; then
-  # Cache dir is gitignored. Flattened from .ziee-cache/sandbox-rootfs/
-  # to .cache/ now that this IS the sandbox-rootfs repo.
-  OUTPUT="$REPO_ROOT/.cache/ziee-sandbox-rootfs-v${SCHEMA}.${REVISION}-${ARCH}-${FLAVOR}.${EXT}"
+  OUTPUT="$REPO_ROOT/.cache/ziee-sandbox-rootfs-${ARCH}-${FLAVOR}.${EXT}"
 fi
 
 mkdir -p "$(dirname "$OUTPUT")"
@@ -132,7 +117,7 @@ else
   fi
 fi
 
-STAGE_DIR="$(dirname "$OUTPUT")/.stage-v${SCHEMA}.${REVISION}-${FLAVOR}"
+STAGE_DIR="$(dirname "$OUTPUT")/.stage-${FLAVOR}"
 # Cleanup needs sudo on platforms where mmdebstrap ran in root mode
 # (the stage dir then contains root-owned files like /var/log/wtmp,
 # /boot, /var/cache/ldconfig that a plain `rm -rf` can't remove).
@@ -155,7 +140,7 @@ trap cleanup_stage EXIT
 # --------------------------------------------------------------------
 
 build_mmdebstrap() {
-  echo "==> mmdebstrap (flavor=$FLAVOR schema=$SCHEMA rev=$REVISION arch=$ARCH)"
+  echo "==> mmdebstrap (flavor=$FLAVOR arch=$ARCH version=${VERSION:-dev})"
   local mirror="http://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}"
   # Collapse the recipe's whitespace/newline package list to a comma list.
   local pkgs
@@ -201,8 +186,26 @@ build_mmdebstrap() {
     sudo rm -f "$prov"
   fi
 
-  # Write the schema sentinel.
-  echo "$SCHEMA" | sudo tee "$STAGE_DIR/.ziee-sandbox-rootfs-schema" >/dev/null
+  # Write the version sentinel (empty on dev builds; CI sets it to the
+  # release tag minus the leading `v`). The server reads this only as
+  # a debug breadcrumb — the DB row is the source of truth.
+  echo "$VERSION" | sudo tee "$STAGE_DIR/.ziee-sandbox-rootfs-version" >/dev/null
+
+  # /etc/resolv.conf — required for any sandbox tool that does DNS.
+  # mmdebstrap leaves /etc/resolv.conf whatever the host had at build
+  # time (or empty/symlink to systemd-resolved that doesn't exist
+  # inside the sandbox). On the Linux native sandbox path the host's
+  # /etc/resolv.conf is bound in by `build_hardening_prefix`, but the
+  # macOS / WSL2 VM paths route through libkrun's TSI — which
+  # transparently forwards any AF_INET UDP send to the host, so a
+  # baked-in public-resolver line works regardless of the actual VM
+  # network state. Without this, pip / uvx / npx / mcp-server-fetch
+  # inside the VM sandbox fails with EAI_AGAIN (`Errno -3 / Try
+  # again`). 1.1.1.1 (Cloudflare) + 8.8.8.8 (Google) chosen for being
+  # the lowest-latency widely-accessible public resolvers; can be
+  # overridden by binding a different /etc/resolv.conf at runtime.
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' \
+    | sudo tee "$STAGE_DIR/etc/resolv.conf" >/dev/null
 
   # Strip setuid bits (defense in depth).
   sudo find "$STAGE_DIR" -xdev \( -perm /u+s -o -perm /g+s \) -type f \
@@ -245,11 +248,11 @@ package_squashfs() {
 }
 
 # Reproducible `.tar.zst` for Windows `wsl --import` (which can't consume a
-# squashfs). Built from the SAME staged tree as the squashfs — same schema,
-# same contents, different packaging (Plan 1 §4). Determinism: sorted names,
-# fixed mtime (SOURCE_DATE_EPOCH), GNU format (no per-file pax atime/ctime
-# headers), numeric ownership preserved. zstd is run single-threaded
-# (`-T0` would interleave nondeterministically) at the highest level.
+# squashfs). Built from the SAME staged tree as the squashfs — same content,
+# different packaging. Determinism: sorted names, fixed mtime
+# (SOURCE_DATE_EPOCH), GNU format (no per-file pax atime/ctime headers),
+# numeric ownership preserved. zstd is run single-threaded (`-T0` would
+# interleave nondeterministically) at the highest level.
 package_tar() {
   echo "==> tar.zst ($OUTPUT)"
   rm -f "$OUTPUT"
