@@ -155,7 +155,14 @@ jobs:
           set -euo pipefail
           if [ "${{ matrix.package }}" = "tar" ]; then ext="tar.zst"; else ext="squashfs"; fi
           art=".cache/ziee-sandbox-rootfs-${{ matrix.arch }}-${{ matrix.flavor }}.${ext}"
-          cosign sign-blob --yes --bundle "${art}.cosign.bundle" "$art"
+          # `--new-bundle-format` emits the Sigstore protobuf bundle
+          # (mediaType + verificationMaterial + messageSignature) that the
+          # server's `sigstore` Rust crate parses. WITHOUT it, cosign
+          # writes the legacy `{base64Signature,cert,rekorBundle}` shape,
+          # which the verifier rejects with
+          # "unrecognized field name 'base64Signature'".
+          cosign sign-blob --yes --new-bundle-format \
+            --bundle "${art}.cosign.bundle" "$art"
 
       - name: publish to GitHub Release
         env:
