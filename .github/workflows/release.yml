@@ -42,18 +42,23 @@ permissions:
 
 jobs:
   release:
-    name: build (${{ matrix.flavor }}, ${{ matrix.package }})
-    runs-on: ubuntu-24.04
+    name: build (${{ matrix.arch }}, ${{ matrix.flavor }}, ${{ matrix.package }})
+    # x86_64 builds on the standard x64 runner; aarch64 builds NATIVELY
+    # on GitHub's free arm64 Linux runner (no qemu emulation — apt +
+    # systemd-nspawn run on real arm64, which keeps the build
+    # deterministic and fast).
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
       contents: write   # gh release upload
       id-token: write   # cosign keyless OIDC
     strategy:
       # Build flavors + packages in parallel; one failing doesn't block
-      # the others. Matrix expansion: 2 flavors × 2 packages = 4 jobs.
+      # the others. Matrix expansion: 2 arches × 2 flavors × 2 packages
+      # = 8 jobs.
       fail-fast: false
       matrix:
-        arch:    [x86_64]
+        arch:    [x86_64, aarch64]
         flavor:  [minimal, full]
         package: [squashfs, tar]
     steps:

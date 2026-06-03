@@ -78,21 +78,23 @@ CI matrix (`.github/workflows/release.yml`) and to the consumer's
 
 ## Artifacts per release
 
-Each tag produces **4 artifacts** (2 flavors × 2 packagings), plus
-`sha256` / `zsync` / `cosign` sidecars:
+Each tag produces **8 artifacts** (2 arches × 2 flavors × 2 packagings),
+plus `sha256` / `zsync` / `cosign` sidecars. `aarch64` builds natively
+on GitHub's arm64 Linux runner (`ubuntu-24.04-arm`):
 
 | Artifact | Host backend |
 |---|---|
-| `ziee-sandbox-rootfs-x86_64-minimal.squashfs` | Linux (`squashfuse`), macOS (libkrun) |
-| `ziee-sandbox-rootfs-x86_64-minimal.tar.zst`  | Windows (`wsl --import`) |
-| `ziee-sandbox-rootfs-x86_64-full.squashfs`    | Linux, macOS |
-| `ziee-sandbox-rootfs-x86_64-full.tar.zst`     | Windows |
+| `ziee-sandbox-rootfs-x86_64-minimal.squashfs`  | Linux x64 (`squashfuse`), macOS Intel (libkrun) |
+| `ziee-sandbox-rootfs-x86_64-minimal.tar.zst`   | Windows x64 (`wsl --import`) |
+| `ziee-sandbox-rootfs-x86_64-full.squashfs`     | Linux x64, macOS Intel |
+| `ziee-sandbox-rootfs-x86_64-full.tar.zst`      | Windows x64 |
+| `ziee-sandbox-rootfs-aarch64-minimal.squashfs` | Linux arm64, macOS Apple Silicon (libkrun) |
+| `ziee-sandbox-rootfs-aarch64-minimal.tar.zst`  | Windows arm64 (`wsl --import`) |
+| `ziee-sandbox-rootfs-aarch64-full.squashfs`    | Linux arm64, macOS Apple Silicon |
+| `ziee-sandbox-rootfs-aarch64-full.tar.zst`     | Windows arm64 |
 
 Same ubuntu-base + apt-snapshot drives both packagings, so the rootfs
 content is semantically identical — only the container format differs.
-`aarch64` artifacts will land via a second `arch:` entry in the
-release matrix once the build path is exercised on Apple Silicon
-runners.
 
 ## Bootstrap (one-time, before any release exists)
 
