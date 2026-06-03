@@ -261,8 +261,15 @@ if [[ -n "${APT_MIRROR:-}" ]]; then
   fi
   mirror_base="$APT_MIRROR"
   echo "==> apt mirror: $APT_MIRROR (override)"
-else
+elif [[ "$UBUNTU_ARCH" == "amd64" ]]; then
   mirror_base="http://archive.ubuntu.com/ubuntu"
+else
+  # Ubuntu's non-x86 "ports" architectures (arm64, etc.) are NOT served
+  # from archive.ubuntu.com (that host only carries amd64/i386) — they
+  # live on ports.ubuntu.com. Same noble/noble-updates/noble-security
+  # pocket layout + the same Canonical signing keys, so the GPG-verified
+  # sources.list below works unchanged.
+  mirror_base="http://ports.ubuntu.com/ubuntu-ports"
 fi
 # Audit S1: drop `[trusted=yes]` so apt enforces the standard
 # GPG-signed-repo guarantee. ubuntu-base 24.04 ships
