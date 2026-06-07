@@ -53,6 +53,14 @@ provision() {
     ln -sf /usr/bin/pip3 /usr/local/bin/pip
   fi
 
+  # uv + uvx — the de-facto launcher for Python-based MCP servers
+  # (`uvx <pkg>`). The uv wheel ships both `uv` and `uvx` console
+  # scripts; with --break-system-packages they land in
+  # /usr/local/bin, which is on PATH inside the sandbox via the
+  # existing `--ro-bind /sandbox-rootfs/usr`. Unpinned to match the
+  # rest of this provision step (numpy/torch/etc. are also unpinned).
+  pip3 install --no-cache-dir --break-system-packages uv
+
   # Python data-science stack (CPU-only torch — full GPU stack would
   # blow past the GitHub Releases 2 GiB per-asset cap).
   pip3 install --no-cache-dir --break-system-packages \
@@ -74,8 +82,8 @@ provision() {
   # the wider parallelism's non-determinism.
   Rscript -e "install.packages(c('ggplot2','dplyr','tidyr','readr','stringr','lubridate','purrr','tibble','jsonlite','httr','data.table','caret','forecast'), repos='https://cloud.r-project.org', Ncpus=2)"
 
-  # Node 22 + ts-node from NodeSource (Canonical's noble repo only
-  # ships node 18; the LLM frequently asks for >=20).
+  # Node 24 (current Active LTS) + ts-node from NodeSource (Canonical's
+  # noble repo only ships node 18; the LLM frequently asks for >=20).
   #
   # Audit S2: install via the NodeSource apt repo + GPG-verified deb,
   # NOT `curl https://deb.nodesource.com/setup_22.x | bash -`. The
@@ -88,7 +96,7 @@ provision() {
     https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
   chmod 0644 /etc/apt/keyrings/nodesource.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
     > /etc/apt/sources.list.d/nodesource.list
   apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 -qq update
   apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=60 \
